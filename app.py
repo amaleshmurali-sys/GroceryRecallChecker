@@ -364,7 +364,7 @@ def build_reply(items):
             "either ongoing or completed."
         )
 
-    return f"{header}\n\n{body}\n\n{footer}"
+    return f"{header}\n\n{body}\n\n{footer}\n\nMore info: {FDA_PRESS_URL}"
 
 
 # ---------- diagnostics ----------
