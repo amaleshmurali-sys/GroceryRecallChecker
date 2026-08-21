@@ -35,8 +35,12 @@ def location_matches(text):
 
 
 def check_fda(term):
+    # Wildcard each word's stem (e.g. "blueberries" -> "blueberr*") so the
+    # openFDA phrase search isn't defeated by singular/plural mismatches.
+    words = re.findall(r"\w+", term)
+    wildcard_query = " AND ".join(f"{word_stem(w)}*" for w in words) if words else term
     params = {
-        "search": f'product_description:"{term}"+AND+status:"Ongoing"',
+        "search": f'product_description:({wildcard_query})+AND+status:"Ongoing"',
         "sort": "report_date:desc",
         "limit": 25,
     }
@@ -54,7 +58,7 @@ def check_fda(term):
                 "product": (m.get("product_description") or "")[:90],
                 "reason": m.get("reason_for_recall", "No reason listed"),
                 "classification": m.get("classification", ""),
-                "date": m.get("report_date", ""),
+                "date": format_date_str(m.get("report_date", "")),
             }
             for m in matches
         ]
@@ -78,7 +82,7 @@ def check_usda(term):
                 "product": (m.get("field_title") or "")[:100],
                 "reason": m.get("field_recall_reason", "No reason listed"),
                 "classification": m.get("field_recall_classification", ""),
-                "date": m.get("field_recall_date", ""),
+                "date": format_date_str(m.get("field_recall_date", "")),
             }
             for m in matches
         ]
@@ -95,6 +99,29 @@ FSIS_PRESS_URL = "https://www.fsis.usda.gov/recalls"
 HEADERS = {"User-Agent": "Mozilla/5.0 (grocery-recall-bot/1.0)"}
 
 
+def word_stem(word):
+    """Crude singular/plural stem so 'blueberries' still matches text
+    saying 'blueberry', and vice versa."""
+    w = word.lower()
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3]
+    if w.endswith("es") and len(w) > 3:
+        return w[:-2]
+    if w.endswith("s") and len(w) > 3:
+        return w[:-1]
+    return w
+
+
+def term_matches(term, haystack):
+    """True if the term (or its singular/plural stem) appears in haystack."""
+    h = haystack.lower()
+    t = term.lower().strip()
+    if t in h:
+        return True
+    stem = word_stem(t)
+    return bool(stem) and stem in h
+
+
 FDA_FOOD_TAXONOMY_ID = "2323"  # "Regulated Product: Food & Beverages" filter term
 
 
@@ -105,10 +132,10 @@ def check_fda_press(term):
     than relying on FDA's search_api_fulltext parameter, since testing
     showed it doesn't reliably index the product-description column —
     it matched a company name but missed the same recall by product term."""
-    term_l = term.lower()
     matches = []
     seen_rows = set()
-    for page_num in range(4):  # food-only list is much shorter, so this
+    consecutive_failures = 0
+    for page_num in range(6):  # food-only list is much shorter, so this
         try:                    # comfortably covers several recent weeks
             r = requests.get(
                 FDA_PRESS_URL,
@@ -120,6 +147,7 @@ def check_fda_press(term):
                 timeout=15,
             )
             r.raise_for_status()
+            consecutive_failures = 0
             soup = BeautifulSoup(r.text, "html.parser")
             page_rows = 0
             for table in soup.find_all("table"):
@@ -133,8 +161,8 @@ def check_fda_press(term):
                         continue
                     seen_rows.add(row_key)
                     date, brand, product, ptype, reason, company = cells[:6]
-                    haystack = f"{brand} {product} {company}".lower()
-                    if term_l in haystack:
+                    haystack = f"{brand} {product} {company}"
+                    if term_matches(term, haystack):
                         matches.append({
                             "source": "FDA press release",
                             "brand": company or brand,
@@ -144,15 +172,21 @@ def check_fda_press(term):
                             "date": date,
                         })
             if page_rows == 0:
-                break  # ran out of pages
+                break  # ran out of real pages
         except requests.RequestException:
-            break
+            # don't give up on the whole check over one bad page (e.g. a
+            # transient block/timeout) — skip it and keep trying further
+            # pages, but stop if several fail in a row (site likely down
+            # or actively blocking us, not just a one-off hiccup)
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                break
+            continue
     return matches
 
 
 def check_fsis_press(term):
     """Scrape FSIS's recall/alert list page the same way, for meat/poultry/egg."""
-    term_l = term.lower()
     try:
         r = requests.get(FSIS_PRESS_URL, headers=HEADERS, timeout=15)
         r.raise_for_status()
@@ -167,8 +201,8 @@ def check_fsis_press(term):
             sibling = link.find_next("p")
             if sibling:
                 summary = sibling.get_text(" ", strip=True)
-            haystack = f"{headline} {summary}".lower()
-            if term_l in haystack:
+            haystack = f"{headline} {summary}"
+            if term_matches(term, haystack):
                 matches.append({
                     "source": "USDA press release",
                     "brand": headline,
@@ -187,6 +221,30 @@ def check_fsis_press(term):
         return deduped[:5]
     except requests.RequestException:
         return []
+
+
+def format_date_str(value):
+    """Normalize dates from different sources into MM/DD/YYYY."""
+    if not value:
+        return "date unknown"
+    v = str(value).strip()
+    if len(v) == 8 and v.isdigit():  # FDA API's raw YYYYMMDD
+        return f"{v[4:6]}/{v[6:8]}/{v[0:4]}"
+    return v
+
+
+def normalize_brand(name):
+    """Loosely normalize a company/brand name so the same real-world
+    recall is recognized as a duplicate even when different sources word
+    it slightly differently (e.g. 'The Hampton Grocers, Inc.' vs
+    'The Hampton Grocer, Inc.')."""
+    n = (name or "").lower()
+    n = re.sub(r"[^a-z0-9\s]", " ", n)
+    n = re.sub(
+        r"\b(the|inc|llc|co|corp|company|ltd|group|foods?|farms?)\b", " ", n
+    )
+    n = re.sub(r"s\b", "", n)  # crude plural/possessive trim: grocers -> grocer
+    return re.sub(r"\s+", " ", n).strip()
 
 
 def check_item(term):
@@ -235,11 +293,12 @@ def build_reply(items):
     any_recalls = False
     for item in items:
         matches = check_item(item)
-        # de-dupe near-identical entries between the API and press-release scrape
+        # de-dupe by normalized brand name — different sources word the same
+        # company slightly differently, so exact-text matching under-deduped
         seen_keys = set()
         deduped = []
         for m in matches:
-            key = (m["brand"][:30].lower(), m["reason"][:30].lower())
+            key = normalize_brand(m["brand"])
             if key not in seen_keys:
                 seen_keys.add(key)
                 deduped.append(m)
@@ -247,8 +306,8 @@ def build_reply(items):
         if matches:
             any_recalls = True
             lines.append(f"⚠️ {item} — {len(matches)} active recall(s)")
-            for m in matches[:3]:
-                lines.append(f"   [{m['source']}] {m['brand']} — {m['reason']}")
+            for m in matches[:5]:
+                lines.append(f"   [{m['source']}] {m['brand']} — {m['reason']} ({m['date']})")
         else:
             lines.append(f"✅ {item} — clear")
     if not any_recalls:
