@@ -12,8 +12,10 @@ first reply after a quiet period.
 
 import os
 import re
+import io
 import time
 import requests
+from openpyxl import load_workbook
 from bs4 import BeautifulSoup
 from flask import Flask, request
 
@@ -130,58 +132,72 @@ def term_matches(term, haystack):
     return bool(stem) and stem in h
 
 
+FDA_XLSX_URL = "https://www.fda.gov/safety/recalls-market-withdrawals-safety-alerts/datatables-data?_format=xlsx"
+
+
 def check_fda_press(term):
-    """Scrape FDA's press-release recall table across several pages —
-    no classification lag, so it shows recalls the enforcement API hasn't
-    indexed yet. Filters to food-related rows ourselves (client-side)
-    rather than relying on an unverified server-side filter parameter."""
-    matches = []
-    seen_rows = set()
-    consecutive_failures = 0
-    for page_num in range(6):
-        if page_num > 0:
-            time.sleep(0.6)  # avoid tripping rate-limit/bot-detection on rapid requests
-        try:
-            r = requests.get(
-                FDA_PRESS_URL, params={"page": page_num}, headers=HEADERS, timeout=15
-            )
-            r.raise_for_status()
-            consecutive_failures = 0
-            soup = BeautifulSoup(r.text, "html.parser")
-            page_rows = 0
-            for table in soup.find_all("table"):
-                for row in table.find_all("tr"):
-                    cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-                    if len(cells) < 6:
-                        continue
-                    date, brand, product, ptype, reason, company = cells[:6]
-                    if date.strip().lower() == "date":
-                        continue  # skip the header row
-                    page_rows += 1
-                    row_key = tuple(cells[:6])
-                    if row_key in seen_rows:
-                        continue
-                    seen_rows.add(row_key)
-                    if "food" not in ptype.lower():
-                        continue
-                    haystack = f"{brand} {product} {company}"
-                    if term_matches(term, haystack):
-                        matches.append({
-                            "source": "FDA press release",
-                            "brand": company or brand,
-                            "product": product,
-                            "reason": reason,
-                            "classification": "",
-                            "date": date,
-                        })
-            if page_rows == 0:
-                break  # ran out of real pages
-        except requests.RequestException:
-            consecutive_failures += 1
-            if consecutive_failures >= 3:
-                break
-            continue
-    return matches
+    """Fetch FDA's full press-release recall dataset as XLSX (the same
+    file behind the page's 'Download XLSX' link) and search it directly.
+    Replaces an earlier page-by-page HTML scrape: testing showed the
+    page's ?page= parameter is ignored (the table pagination is
+    client-side JavaScript), so every 'page' silently returned identical
+    content. The XLSX export isn't paginated at all — one request gets
+    the whole dataset."""
+    try:
+        r = requests.get(FDA_XLSX_URL, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        wb = load_workbook(io.BytesIO(r.content), read_only=True, data_only=True)
+        ws = wb.active
+        rows = ws.iter_rows(values_only=True)
+        header = next(rows, None)
+        if not header:
+            return []
+        header = [str(h).strip().lower() if h else "" for h in header]
+
+        def col_idx(fragment):
+            for i, h in enumerate(header):
+                if fragment in h:
+                    return i
+            return None
+
+        idx = {
+            "date": col_idx("date"),
+            "brand": col_idx("brand"),
+            "product": col_idx("product description"),
+            "type": col_idx("product type"),
+            "reason": col_idx("reason"),
+            "company": col_idx("company"),
+        }
+
+        def cell(row, key):
+            i = idx.get(key)
+            if i is None or i >= len(row) or row[i] is None:
+                return ""
+            return str(row[i]).strip()
+
+        matches = []
+        for row in rows:
+            ptype = cell(row, "type")
+            if "food" not in ptype.lower():
+                continue
+            brand = cell(row, "brand")
+            product = cell(row, "product")
+            company = cell(row, "company")
+            reason = cell(row, "reason")
+            date = cell(row, "date")
+            haystack = f"{brand} {product} {company}"
+            if term_matches(term, haystack):
+                matches.append({
+                    "source": "FDA press release",
+                    "brand": company or brand,
+                    "product": product,
+                    "reason": reason,
+                    "classification": "",
+                    "date": date,
+                })
+        return matches
+    except Exception:
+        return []
 
 
 def check_fsis_press(term):
@@ -320,7 +336,7 @@ def debug_check(term):
     """Runs each source and reports raw status/counts instead of a clean
     yes/no answer — lets us see what's actually happening on the server
     (blocked request? empty page? parsing miss?) instead of guessing."""
-    lines = [f"🔧 Debug v5 for: {term}\n"]
+    lines = [f"🔧 Debug v6 for: {term}\n"]
 
     # openFDA
     try:
@@ -358,39 +374,22 @@ def debug_check(term):
     except requests.RequestException as e:
         lines.append(f"[USDA API] request failed: {e}")
 
-    # FDA press page — test several pages individually to find where/if blocking starts
-    for page_num in range(4):
-        if page_num > 0:
-            time.sleep(0.6)
-        try:
-            r = requests.get(
-                FDA_PRESS_URL, params={"page": page_num}, headers=HEADERS, timeout=15
-            )
-            soup = BeautifulSoup(r.text, "html.parser")
-            tables = soup.find_all("table")
-            total_rows = sum(len(t.find_all("tr")) for t in tables)
-            lines.append(
-                f"[FDA press page {page_num}] status={r.status_code}, "
-                f"len={len(r.text)}, tables={len(tables)}, rows={total_rows}"
-            )
-            if total_rows == 0:
-                lines.append(f"  preview: {r.text[:150].strip()}")
-            else:
-                # print the first real data row so we can tell if this page's
-                # content is actually different from the other pages, or if
-                # the site is just re-serving page 0 once we go past the end
-                first_row_cells = None
-                for table in tables:
-                    for row in table.find_all("tr"):
-                        cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-                        if len(cells) >= 6 and cells[0].strip().lower() != "date":
-                            first_row_cells = cells[:2]  # date, brand
-                            break
-                    if first_row_cells:
-                        break
-                lines.append(f"  first data row: {first_row_cells}")
-        except requests.RequestException as e:
-            lines.append(f"[FDA press page {page_num}] request failed: {e}")
+    # FDA press-release XLSX export (full dataset, no pagination needed)
+    try:
+        r = requests.get(FDA_XLSX_URL, headers=HEADERS, timeout=30)
+        lines.append(f"[FDA XLSX export] status={r.status_code}, bytes={len(r.content)}")
+        if r.status_code == 200:
+            wb = load_workbook(io.BytesIO(r.content), read_only=True, data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(values_only=True))
+            lines.append(f"  total rows (incl. header): {len(rows)}")
+            if rows:
+                lines.append(f"  header: {rows[0]}")
+            if len(rows) > 1:
+                lines.append(f"  first data row: {rows[1]}")
+                lines.append(f"  last data row: {rows[-1]}")
+    except Exception as e:
+        lines.append(f"[FDA XLSX export] failed: {e}")
 
     # FSIS press page
     try:
