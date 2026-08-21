@@ -35,12 +35,19 @@ def location_matches(text):
 
 
 def check_fda(term):
-    # Wildcard each word's stem (e.g. "blueberries" -> "blueberr*") so the
-    # openFDA phrase search isn't defeated by singular/plural mismatches.
-    words = re.findall(r"\w+", term)
-    wildcard_query = " AND ".join(f"{word_stem(w)}*" for w in words) if words else term
+    matches = _check_fda_query(term)
+    if not matches:
+        # try the singular/plural stem too (e.g. "blueberries" -> "blueberr")
+        # as a second safe, quoted-phrase query — no wildcard syntax risk
+        stem = word_stem(term)
+        if stem and stem != term.lower():
+            matches = _check_fda_query(stem)
+    return matches
+
+
+def _check_fda_query(term):
     params = {
-        "search": f'product_description:({wildcard_query})+AND+status:"Ongoing"',
+        "search": f'product_description:"{term}"+AND+status:"Ongoing"',
         "sort": "report_date:desc",
         "limit": 25,
     }
@@ -122,29 +129,18 @@ def term_matches(term, haystack):
     return bool(stem) and stem in h
 
 
-FDA_FOOD_TAXONOMY_ID = "2323"  # "Regulated Product: Food & Beverages" filter term
-
-
 def check_fda_press(term):
-    """Query FDA's press-release page filtered server-side to Food &
-    Beverages only (field_regulated_product_field), then match the term
-    ourselves against brand/product/company. We do our own matching rather
-    than relying on FDA's search_api_fulltext parameter, since testing
-    showed it doesn't reliably index the product-description column —
-    it matched a company name but missed the same recall by product term."""
+    """Scrape FDA's press-release recall table across several pages —
+    no classification lag, so it shows recalls the enforcement API hasn't
+    indexed yet. Filters to food-related rows ourselves (client-side)
+    rather than relying on an unverified server-side filter parameter."""
     matches = []
     seen_rows = set()
     consecutive_failures = 0
-    for page_num in range(6):  # food-only list is much shorter, so this
-        try:                    # comfortably covers several recent weeks
+    for page_num in range(6):
+        try:
             r = requests.get(
-                FDA_PRESS_URL,
-                params={
-                    "field_regulated_product_field": FDA_FOOD_TAXONOMY_ID,
-                    "page": page_num,
-                },
-                headers=HEADERS,
-                timeout=15,
+                FDA_PRESS_URL, params={"page": page_num}, headers=HEADERS, timeout=15
             )
             r.raise_for_status()
             consecutive_failures = 0
@@ -161,6 +157,8 @@ def check_fda_press(term):
                         continue
                     seen_rows.add(row_key)
                     date, brand, product, ptype, reason, company = cells[:6]
+                    if "food" not in ptype.lower():
+                        continue
                     haystack = f"{brand} {product} {company}"
                     if term_matches(term, haystack):
                         matches.append({
@@ -174,10 +172,6 @@ def check_fda_press(term):
             if page_rows == 0:
                 break  # ran out of real pages
         except requests.RequestException:
-            # don't give up on the whole check over one bad page (e.g. a
-            # transient block/timeout) — skip it and keep trying further
-            # pages, but stop if several fail in a row (site likely down
-            # or actively blocking us, not just a one-off hiccup)
             consecutive_failures += 1
             if consecutive_failures >= 3:
                 break
