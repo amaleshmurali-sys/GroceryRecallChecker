@@ -95,12 +95,24 @@ FSIS_PRESS_URL = "https://www.fsis.usda.gov/recalls"
 HEADERS = {"User-Agent": "Mozilla/5.0 (grocery-recall-bot/1.0)"}
 
 
+FDA_FOOD_TAXONOMY_ID = "2323"  # "Regulated Product: Food & Beverages" filter term
+
+
 def check_fda_press(term):
-    """Scrape FDA's press-release recall table — no classification lag,
-    so it shows recalls the enforcement API hasn't indexed yet."""
-    term_l = term.lower()
+    """Query FDA's press-release page using its own server-side filters:
+    full-text search for the item, restricted to Food & Beverages. No
+    classification lag, and no need to paginate or guess — FDA does the
+    matching and the product-type filtering for us."""
     try:
-        r = requests.get(FDA_PRESS_URL, headers=HEADERS, timeout=15)
+        r = requests.get(
+            FDA_PRESS_URL,
+            params={
+                "search_api_fulltext": term,
+                "field_regulated_product_field": FDA_FOOD_TAXONOMY_ID,
+            },
+            headers=HEADERS,
+            timeout=15,
+        )
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         matches = []
@@ -110,16 +122,14 @@ def check_fda_press(term):
                 if len(cells) < 6:
                     continue
                 date, brand, product, ptype, reason, company = cells[:6]
-                haystack = f"{brand} {product} {company}".lower()
-                if term_l in haystack and "food" in ptype.lower():
-                    matches.append({
-                        "source": "FDA press release",
-                        "brand": company or brand,
-                        "product": product,
-                        "reason": reason,
-                        "classification": "",
-                        "date": date,
-                    })
+                matches.append({
+                    "source": "FDA press release",
+                    "brand": company or brand,
+                    "product": product,
+                    "reason": reason,
+                    "classification": "",
+                    "date": date,
+                })
         return matches
     except requests.RequestException:
         return []
