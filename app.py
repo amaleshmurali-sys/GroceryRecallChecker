@@ -373,6 +373,20 @@ def debug_check(term):
             )
             if total_rows == 0:
                 lines.append(f"  preview: {r.text[:150].strip()}")
+            else:
+                # print the first real data row so we can tell if this page's
+                # content is actually different from the other pages, or if
+                # the site is just re-serving page 0 once we go past the end
+                first_row_cells = None
+                for table in tables:
+                    for row in table.find_all("tr"):
+                        cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+                        if len(cells) >= 6:
+                            first_row_cells = cells[:2]  # date, brand
+                            break
+                    if first_row_cells:
+                        break
+                lines.append(f"  first row: {first_row_cells}")
         except requests.RequestException as e:
             lines.append(f"[FDA press page {page_num}] request failed: {e}")
 
