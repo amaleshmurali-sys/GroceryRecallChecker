@@ -152,7 +152,7 @@ def check_fda_press(term):
         header = next(rows, None)
         if not header:
             return []
-        header = [str(h).strip().lower() if h else "" for h in header]
+        header = [str(h).strip().lower().replace("-", " ") if h else "" for h in header]
 
         def col_idx(fragment):
             for i, h in enumerate(header):
@@ -336,7 +336,7 @@ def debug_check(term):
     """Runs each source and reports raw status/counts instead of a clean
     yes/no answer — lets us see what's actually happening on the server
     (blocked request? empty page? parsing miss?) instead of guessing."""
-    lines = [f"🔧 Debug v6 for: {term}\n"]
+    lines = [f"🔧 Debug v7 for: {term}\n"]
 
     # openFDA
     try:
@@ -385,6 +385,25 @@ def debug_check(term):
             lines.append(f"  total rows (incl. header): {len(rows)}")
             if rows:
                 lines.append(f"  header: {rows[0]}")
+                header_norm = [str(h).strip().lower().replace("-", " ") if h else "" for h in rows[0]]
+
+                def col_idx(fragment):
+                    for i, h in enumerate(header_norm):
+                        if fragment in h:
+                            return i
+                    return None
+
+                resolved = {
+                    "date": col_idx("date"),
+                    "brand": col_idx("brand"),
+                    "product": col_idx("product description"),
+                    "type": col_idx("product type"),
+                    "reason": col_idx("reason"),
+                    "company": col_idx("company"),
+                }
+                lines.append(f"  resolved column indices: {resolved}")
+                if any(v is None for v in resolved.values()):
+                    lines.append("  ⚠️ one or more columns failed to match!")
             if len(rows) > 1:
                 lines.append(f"  first data row: {rows[1]}")
                 lines.append(f"  last data row: {rows[-1]}")
