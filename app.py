@@ -154,12 +154,14 @@ def check_fda_press(term):
                     cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
                     if len(cells) < 6:
                         continue
+                    date, brand, product, ptype, reason, company = cells[:6]
+                    if date.strip().lower() == "date":
+                        continue  # skip the header row
                     page_rows += 1
                     row_key = tuple(cells[:6])
                     if row_key in seen_rows:
                         continue
                     seen_rows.add(row_key)
-                    date, brand, product, ptype, reason, company = cells[:6]
                     if "food" not in ptype.lower():
                         continue
                     haystack = f"{brand} {product} {company}"
@@ -318,7 +320,7 @@ def debug_check(term):
     """Runs each source and reports raw status/counts instead of a clean
     yes/no answer — lets us see what's actually happening on the server
     (blocked request? empty page? parsing miss?) instead of guessing."""
-    lines = [f"🔧 Debug v4 for: {term}\n"]
+    lines = [f"🔧 Debug v5 for: {term}\n"]
 
     # openFDA
     try:
@@ -381,12 +383,12 @@ def debug_check(term):
                 for table in tables:
                     for row in table.find_all("tr"):
                         cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-                        if len(cells) >= 6:
+                        if len(cells) >= 6 and cells[0].strip().lower() != "date":
                             first_row_cells = cells[:2]  # date, brand
                             break
                     if first_row_cells:
                         break
-                lines.append(f"  first row: {first_row_cells}")
+                lines.append(f"  first data row: {first_row_cells}")
         except requests.RequestException as e:
             lines.append(f"[FDA press page {page_num}] request failed: {e}")
 
