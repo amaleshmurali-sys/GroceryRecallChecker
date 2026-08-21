@@ -309,6 +309,76 @@ def build_reply(items):
     return "\n".join(lines)
 
 
+# ---------- diagnostics ----------
+
+def debug_check(term):
+    """Runs each source and reports raw status/counts instead of a clean
+    yes/no answer — lets us see what's actually happening on the server
+    (blocked request? empty page? parsing miss?) instead of guessing."""
+    lines = [f"🔧 Debug for: {term}\n"]
+
+    # openFDA
+    try:
+        params = {
+            "search": f'product_description:"{term}"+AND+status:"Ongoing"',
+            "sort": "report_date:desc",
+            "limit": 25,
+        }
+        r = requests.get(FDA_URL, params=params, timeout=15)
+        body_preview = r.text[:150].replace("\n", " ")
+        lines.append(f"[openFDA API] status={r.status_code}")
+        if r.status_code == 200:
+            n = len(r.json().get("results", []))
+            lines.append(f"  raw results (before CA filter): {n}")
+        else:
+            lines.append(f"  body: {body_preview}")
+    except requests.RequestException as e:
+        lines.append(f"[openFDA API] request failed: {e}")
+
+    # USDA FSIS API
+    try:
+        r = requests.get(
+            USDA_URL,
+            params={"field_product_items_value": term, "field_active_notice": "True"},
+            timeout=15,
+        )
+        lines.append(f"[USDA API] status={r.status_code}")
+        if r.status_code == 200:
+            data = r.json()
+            n = len(data) if isinstance(data, list) else "not a list"
+            lines.append(f"  raw results: {n}")
+        else:
+            lines.append(f"  body: {r.text[:150]}")
+    except requests.RequestException as e:
+        lines.append(f"[USDA API] request failed: {e}")
+
+    # FDA press page (page 0 only, for diagnostics)
+    try:
+        r = requests.get(FDA_PRESS_URL, params={"page": 0}, headers=HEADERS, timeout=15)
+        lines.append(f"[FDA press page] status={r.status_code}, body length={len(r.text)}")
+        soup = BeautifulSoup(r.text, "html.parser")
+        tables = soup.find_all("table")
+        total_rows = sum(len(t.find_all("tr")) for t in tables)
+        lines.append(f"  tables found: {len(tables)}, total rows: {total_rows}")
+        lines.append(f"  page title: {soup.title.string.strip() if soup.title else 'none'}")
+        if total_rows == 0:
+            lines.append(f"  body preview: {r.text[:200].strip()}")
+    except requests.RequestException as e:
+        lines.append(f"[FDA press page] request failed: {e}")
+
+    # FSIS press page
+    try:
+        r = requests.get(FSIS_PRESS_URL, headers=HEADERS, timeout=15)
+        lines.append(f"[FSIS press page] status={r.status_code}, body length={len(r.text)}")
+        soup = BeautifulSoup(r.text, "html.parser")
+        links = soup.find_all("a")
+        lines.append(f"  links found: {len(links)}")
+    except requests.RequestException as e:
+        lines.append(f"[FSIS press page] request failed: {e}")
+
+    return "\n".join(lines)
+
+
 # ---------- Telegram webhook ----------
 
 def send_message(chat_id, text):
@@ -335,6 +405,14 @@ def webhook():
             "Send me your grocery list (one item per line) and I'll check it "
             "against active FDA/USDA recalls for California.",
         )
+        return "ok"
+
+    if text.strip().lower().startswith("/debug"):
+        term = text.strip()[6:].strip()
+        if not term:
+            send_message(chat_id, "Usage: /debug blueberries")
+            return "ok"
+        send_message(chat_id, debug_check(term))
         return "ok"
 
     items = parse_list(text)
