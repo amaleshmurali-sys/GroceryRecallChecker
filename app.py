@@ -13,6 +13,7 @@ first reply after a quiet period.
 import os
 import re
 import requests
+from bs4 import BeautifulSoup
 from flask import Flask, request
 
 app = Flask(__name__)
@@ -85,11 +86,94 @@ def check_usda(term):
         return []
 
 
+# ---------- press-release scraping (catches very recent recalls the ----------
+# ---------- classification-lagged APIs above haven't picked up yet)  ----------
+
+FDA_PRESS_URL = "https://www.fda.gov/safety/recalls-market-withdrawals-safety-alerts"
+FSIS_PRESS_URL = "https://www.fsis.usda.gov/recalls"
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (grocery-recall-bot/1.0)"}
+
+
+def check_fda_press(term):
+    """Scrape FDA's press-release recall table — no classification lag,
+    so it shows recalls the enforcement API hasn't indexed yet."""
+    term_l = term.lower()
+    try:
+        r = requests.get(FDA_PRESS_URL, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        matches = []
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+                if len(cells) < 6:
+                    continue
+                date, brand, product, ptype, reason, company = cells[:6]
+                haystack = f"{brand} {product} {company}".lower()
+                if term_l in haystack and "food" in ptype.lower():
+                    matches.append({
+                        "source": "FDA press release",
+                        "brand": company or brand,
+                        "product": product,
+                        "reason": reason,
+                        "classification": "",
+                        "date": date,
+                    })
+        return matches
+    except requests.RequestException:
+        return []
+
+
+def check_fsis_press(term):
+    """Scrape FSIS's recall/alert list page the same way, for meat/poultry/egg."""
+    term_l = term.lower()
+    try:
+        r = requests.get(FSIS_PRESS_URL, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        matches = []
+        # FSIS lists recalls as headline links followed by a summary paragraph
+        for link in soup.find_all("a"):
+            headline = link.get_text(" ", strip=True)
+            if not headline or len(headline) < 15:
+                continue
+            summary = ""
+            sibling = link.find_next("p")
+            if sibling:
+                summary = sibling.get_text(" ", strip=True)
+            haystack = f"{headline} {summary}".lower()
+            if term_l in haystack:
+                matches.append({
+                    "source": "USDA press release",
+                    "brand": headline,
+                    "product": "",
+                    "reason": summary[:150],
+                    "classification": "",
+                    "date": "",
+                })
+        # de-dupe by headline, cap results
+        seen = set()
+        deduped = []
+        for m in matches:
+            if m["brand"] not in seen:
+                seen.add(m["brand"])
+                deduped.append(m)
+        return deduped[:5]
+    except requests.RequestException:
+        return []
+
+
 def check_item(term):
     term = term.strip()
     if not term:
         return []
-    return check_fda(term) + check_usda(term)
+    return (
+        check_fda(term)
+        + check_usda(term)
+        + check_fda_press(term)
+        + check_fsis_press(term)
+    )
 
 
 # ---------- parsing a pasted grocery list into item terms ----------
@@ -126,6 +210,15 @@ def build_reply(items):
     any_recalls = False
     for item in items:
         matches = check_item(item)
+        # de-dupe near-identical entries between the API and press-release scrape
+        seen_keys = set()
+        deduped = []
+        for m in matches:
+            key = (m["brand"][:30].lower(), m["reason"][:30].lower())
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped.append(m)
+        matches = deduped
         if matches:
             any_recalls = True
             lines.append(f"⚠️ {item} — {len(matches)} active recall(s)")
