@@ -69,6 +69,7 @@ def _check_fda_query(term):
                 "reason": m.get("reason_for_recall", "No reason listed"),
                 "classification": m.get("classification", ""),
                 "date": format_date_str(m.get("report_date", "")),
+                "terminated": "unknown",
             }
             for m in matches
         ]
@@ -93,6 +94,7 @@ def check_usda(term):
                 "reason": m.get("field_recall_reason", "No reason listed"),
                 "classification": m.get("field_recall_classification", ""),
                 "date": format_date_str(m.get("field_recall_date", "")),
+                "terminated": "unknown",
             }
             for m in matches
         ]
@@ -167,6 +169,7 @@ def check_fda_press(term):
             "type": col_idx("product type"),
             "reason": col_idx("reason"),
             "company": col_idx("company"),
+            "terminated": col_idx("terminated"),
         }
 
         def cell(row, key):
@@ -185,6 +188,8 @@ def check_fda_press(term):
             company = cell(row, "company")
             reason = cell(row, "reason")
             date = cell(row, "date")
+            terminated_raw = cell(row, "terminated")
+            terminated = "Yes" if terminated_raw.strip().lower() in ("yes", "y", "true") else "No"
             haystack = f"{brand} {product} {company}"
             if term_matches(term, haystack):
                 matches.append({
@@ -194,6 +199,7 @@ def check_fda_press(term):
                     "reason": reason,
                     "classification": "",
                     "date": date,
+                    "terminated": terminated,
                 })
         return matches
     except Exception:
@@ -225,6 +231,7 @@ def check_fsis_press(term):
                     "reason": summary[:150],
                     "classification": "",
                     "date": "",
+                    "terminated": "unknown",
                 })
         # de-dupe by headline, cap results
         seen = set()
@@ -322,11 +329,29 @@ def build_reply(items):
             any_recalls = True
             lines.append(f"⚠️ {item} — {len(matches)} active recall(s)")
             for m in matches[:5]:
-                lines.append(f"   [{m['source']}] {m['brand']} — {m['reason']} ({m['date']})")
+                term_status = m.get("terminated", "unknown")
+                term_label = (
+                    "Terminated" if term_status == "Yes"
+                    else "Not terminated" if term_status == "No"
+                    else "Terminated status unknown"
+                )
+                lines.append(
+                    f"   [{m['source']}] {m['brand']} — {m['reason']} "
+                    f"({m['date']}) — {term_label}"
+                )
         else:
             lines.append(f"✅ {item} — clear")
     if not any_recalls:
         lines.append("\nNothing on this list has an active CA recall right now.")
+    else:
+        lines.append(
+            "\nA Terminated Recall is a recall where the FDA has determined "
+            "that all reasonable efforts have been made to remove or correct "
+            "the violative product in accordance with the recall strategy, "
+            "and proper disposition has been made according to the degree of "
+            "hazard. Recalls that are not indicated as being terminated are "
+            "either ongoing or completed."
+        )
     return "\n".join(lines)
 
 
