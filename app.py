@@ -311,8 +311,10 @@ def build_reply(items):
     if not items:
         return "Didn't find any grocery items in that message — send one item per line."
 
-    lines = ["🛒 Recall check (California / nationwide):\n"]
+    header = "🛒 Recall check (California / nationwide):"
+    item_blocks = []
     any_recalls = False
+
     for item in items:
         matches = check_item(item)
         # de-dupe by normalized brand name — different sources word the same
@@ -325,34 +327,44 @@ def build_reply(items):
                 seen_keys.add(key)
                 deduped.append(m)
         matches = deduped
+
+        block_lines = []
         if matches:
             any_recalls = True
-            lines.append(f"⚠️ {item} — {len(matches)} active recall(s)")
-            for m in matches[:5]:
+            block_lines.append(f"⚠️ {item} — {len(matches)} active recall(s)")
+            shown = matches[:5]
+            for m in shown:
                 term_status = m.get("terminated", "unknown")
                 term_label = (
                     "Terminated" if term_status == "Yes"
                     else "Not terminated" if term_status == "No"
                     else "Terminated status unknown"
                 )
-                lines.append(
+                block_lines.append(
                     f"   [{m['source']}] {m['brand']} — {m['reason']} "
                     f"({m['date']}) — {term_label}"
                 )
+            if len(matches) > len(shown):
+                block_lines.append(f"   …and {len(matches) - len(shown)} more not shown")
         else:
-            lines.append(f"✅ {item} — clear")
+            block_lines.append(f"✅ {item} — clear")
+        item_blocks.append("\n".join(block_lines))
+
+    body = "\n\n".join(item_blocks)
+
     if not any_recalls:
-        lines.append("\nNothing on this list has an active CA recall right now.")
+        footer = "Nothing on this list has an active CA recall right now."
     else:
-        lines.append(
-            "\nA Terminated Recall is a recall where the FDA has determined "
+        footer = (
+            "A Terminated Recall is a recall where the FDA has determined "
             "that all reasonable efforts have been made to remove or correct "
             "the violative product in accordance with the recall strategy, "
             "and proper disposition has been made according to the degree of "
             "hazard. Recalls that are not indicated as being terminated are "
             "either ongoing or completed."
         )
-    return "\n".join(lines)
+
+    return f"{header}\n\n{body}\n\n{footer}"
 
 
 # ---------- diagnostics ----------
