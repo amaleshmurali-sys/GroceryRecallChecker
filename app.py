@@ -318,7 +318,7 @@ def debug_check(term):
     """Runs each source and reports raw status/counts instead of a clean
     yes/no answer — lets us see what's actually happening on the server
     (blocked request? empty page? parsing miss?) instead of guessing."""
-    lines = [f"🔧 Debug for: {term}\n"]
+    lines = [f"🔧 Debug v4 for: {term}\n"]
 
     # openFDA
     try:
