@@ -12,6 +12,7 @@ first reply after a quiet period.
 
 import os
 import re
+import time
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request
@@ -76,7 +77,7 @@ def _check_fda_query(term):
 def check_usda(term):
     params = {"field_product_items_value": term, "field_active_notice": "True"}
     try:
-        r = requests.get(USDA_URL, params=params, timeout=15)
+        r = requests.get(USDA_URL, params=params, headers=HEADERS, timeout=15)
         r.raise_for_status()
         results = r.json()
         if not isinstance(results, list):
@@ -103,7 +104,14 @@ def check_usda(term):
 FDA_PRESS_URL = "https://www.fda.gov/safety/recalls-market-withdrawals-safety-alerts"
 FSIS_PRESS_URL = "https://www.fsis.usda.gov/recalls"
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (grocery-recall-bot/1.0)"}
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 
 def word_stem(word):
@@ -138,6 +146,8 @@ def check_fda_press(term):
     seen_rows = set()
     consecutive_failures = 0
     for page_num in range(6):
+        if page_num > 0:
+            time.sleep(0.6)  # avoid tripping rate-limit/bot-detection on rapid requests
         try:
             r = requests.get(
                 FDA_PRESS_URL, params={"page": page_num}, headers=HEADERS, timeout=15
@@ -340,6 +350,7 @@ def debug_check(term):
         r = requests.get(
             USDA_URL,
             params={"field_product_items_value": term, "field_active_notice": "True"},
+            headers=HEADERS,
             timeout=15,
         )
         lines.append(f"[USDA API] status={r.status_code}")
@@ -352,19 +363,25 @@ def debug_check(term):
     except requests.RequestException as e:
         lines.append(f"[USDA API] request failed: {e}")
 
-    # FDA press page (page 0 only, for diagnostics)
-    try:
-        r = requests.get(FDA_PRESS_URL, params={"page": 0}, headers=HEADERS, timeout=15)
-        lines.append(f"[FDA press page] status={r.status_code}, body length={len(r.text)}")
-        soup = BeautifulSoup(r.text, "html.parser")
-        tables = soup.find_all("table")
-        total_rows = sum(len(t.find_all("tr")) for t in tables)
-        lines.append(f"  tables found: {len(tables)}, total rows: {total_rows}")
-        lines.append(f"  page title: {soup.title.string.strip() if soup.title else 'none'}")
-        if total_rows == 0:
-            lines.append(f"  body preview: {r.text[:200].strip()}")
-    except requests.RequestException as e:
-        lines.append(f"[FDA press page] request failed: {e}")
+    # FDA press page — test several pages individually to find where/if blocking starts
+    for page_num in range(4):
+        if page_num > 0:
+            time.sleep(0.6)
+        try:
+            r = requests.get(
+                FDA_PRESS_URL, params={"page": page_num}, headers=HEADERS, timeout=15
+            )
+            soup = BeautifulSoup(r.text, "html.parser")
+            tables = soup.find_all("table")
+            total_rows = sum(len(t.find_all("tr")) for t in tables)
+            lines.append(
+                f"[FDA press page {page_num}] status={r.status_code}, "
+                f"len={len(r.text)}, tables={len(tables)}, rows={total_rows}"
+            )
+            if total_rows == 0:
+                lines.append(f"  preview: {r.text[:150].strip()}")
+        except requests.RequestException as e:
+            lines.append(f"[FDA press page {page_num}] request failed: {e}")
 
     # FSIS press page
     try:
