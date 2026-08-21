@@ -17,7 +17,7 @@ import time
 import requests
 from openpyxl import load_workbook
 from bs4 import BeautifulSoup
-from flask import Flask, request
+from flask import Flask, request, render_template_string
 
 app = Flask(__name__)
 
@@ -491,7 +491,49 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def health():
-    return "Recall bot is running."
+    return "Recall bot is running. Visit /check to use it in a browser."
+
+
+WEB_FORM_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Grocery Recall Check</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 600px; margin: 30px auto; padding: 0 16px; color: #222; }
+    h1 { font-size: 22px; }
+    textarea { width: 100%; min-height: 120px; font-size: 15px; padding: 10px; box-sizing: border-box; }
+    button { margin-top: 10px; padding: 10px 20px; font-size: 15px; background: #222; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+    pre { white-space: pre-wrap; background: #f5f5f0; padding: 14px; border-radius: 4px; font-size: 14px; margin-top: 20px; }
+    .hint { color: #666; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>🛒 Grocery Recall Check</h1>
+  <p class="hint">Paste your list, one item per line. Checked against active FDA/USDA recalls for California / nationwide.</p>
+  <form method="POST">
+    <textarea name="list" placeholder="blueberries&#10;ground beef&#10;eggs">{{ list_text }}</textarea><br>
+    <button type="submit">Check list</button>
+  </form>
+  {% if result %}
+  <pre>{{ result }}</pre>
+  {% endif %}
+</body>
+</html>
+"""
+
+
+@app.route("/check", methods=["GET", "POST"])
+def web_check():
+    result = None
+    list_text = ""
+    if request.method == "POST":
+        list_text = request.form.get("list", "")
+        items = parse_list(list_text)
+        result = build_reply(items)
+    return render_template_string(WEB_FORM_HTML, result=result, list_text=list_text)
 
 
 if __name__ == "__main__":
