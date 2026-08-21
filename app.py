@@ -99,40 +99,55 @@ FDA_FOOD_TAXONOMY_ID = "2323"  # "Regulated Product: Food & Beverages" filter te
 
 
 def check_fda_press(term):
-    """Query FDA's press-release page using its own server-side filters:
-    full-text search for the item, restricted to Food & Beverages. No
-    classification lag, and no need to paginate or guess — FDA does the
-    matching and the product-type filtering for us."""
-    try:
-        r = requests.get(
-            FDA_PRESS_URL,
-            params={
-                "search_api_fulltext": term,
-                "field_regulated_product_field": FDA_FOOD_TAXONOMY_ID,
-            },
-            headers=HEADERS,
-            timeout=15,
-        )
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-        matches = []
-        for table in soup.find_all("table"):
-            for row in table.find_all("tr"):
-                cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-                if len(cells) < 6:
-                    continue
-                date, brand, product, ptype, reason, company = cells[:6]
-                matches.append({
-                    "source": "FDA press release",
-                    "brand": company or brand,
-                    "product": product,
-                    "reason": reason,
-                    "classification": "",
-                    "date": date,
-                })
-        return matches
-    except requests.RequestException:
-        return []
+    """Query FDA's press-release page filtered server-side to Food &
+    Beverages only (field_regulated_product_field), then match the term
+    ourselves against brand/product/company. We do our own matching rather
+    than relying on FDA's search_api_fulltext parameter, since testing
+    showed it doesn't reliably index the product-description column —
+    it matched a company name but missed the same recall by product term."""
+    term_l = term.lower()
+    matches = []
+    seen_rows = set()
+    for page_num in range(4):  # food-only list is much shorter, so this
+        try:                    # comfortably covers several recent weeks
+            r = requests.get(
+                FDA_PRESS_URL,
+                params={
+                    "field_regulated_product_field": FDA_FOOD_TAXONOMY_ID,
+                    "page": page_num,
+                },
+                headers=HEADERS,
+                timeout=15,
+            )
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+            page_rows = 0
+            for table in soup.find_all("table"):
+                for row in table.find_all("tr"):
+                    cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+                    if len(cells) < 6:
+                        continue
+                    page_rows += 1
+                    row_key = tuple(cells[:6])
+                    if row_key in seen_rows:
+                        continue
+                    seen_rows.add(row_key)
+                    date, brand, product, ptype, reason, company = cells[:6]
+                    haystack = f"{brand} {product} {company}".lower()
+                    if term_l in haystack:
+                        matches.append({
+                            "source": "FDA press release",
+                            "brand": company or brand,
+                            "product": product,
+                            "reason": reason,
+                            "classification": "",
+                            "date": date,
+                        })
+            if page_rows == 0:
+                break  # ran out of pages
+        except requests.RequestException:
+            break
+    return matches
 
 
 def check_fsis_press(term):
